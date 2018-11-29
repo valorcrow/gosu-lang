@@ -8568,11 +8568,18 @@ public final class GosuParser extends ParserBase implements IGosuParser
     //noinspection unchecked
     score.setArguments( (List)argExpressions );
     IMethodInfo mi = ((FunctionType)listFunctionTypes.get( 0 )).getMethodInfo();
-    mi = ((ITypeInfo)mi.getContainer()).getMethod( mi.getName(), getTypes( argExpressions ).toArray( new IType[argExpressions.size()] ) );
+    mi = ((ITypeInfo)mi.getContainer()).getMethod( mi.getName(), getParamTypes( argExpressions ) );
     score.setInferredFunctionType( new FunctionType( mi ) );
     score.setRawFunctionType( score.getInferredFunctionType() );
     score.setScore( 1 );
     return score;
+  }
+
+  private IType[] getParamTypes( List<Expression> argExpressions )
+  {
+    return getTypes( argExpressions ).stream()
+      .map( e -> e == null ? JavaTypes.OBJECT() : e )
+      .toArray( IType[]::new );
   }
 
   private MethodScore scoreMethod( IType callsiteEnclosingType, IType rootType, IInvocableType funcType, List<? extends IInvocableType> listFunctionTypes, List<Expression> argExpressions, boolean bSimple, boolean bLookInCache) {
@@ -10239,8 +10246,10 @@ public final class GosuParser extends ParserBase implements IGosuParser
         ParsedElement currentStmt = peekStatement();
         if( !(currentStmt instanceof NoOpStatement) && !(prevStmt instanceof NoOpStatement) )
         {
-          warn( currentStmt, prevStmt == null || prevStmt.getLineNum() != currentStmt.getLineNum() ||
-                  prevStmt.hasParseExceptions() || currentStmt.hasParseExceptions(),
+          warn( currentStmt,
+                prevStmt == null || prevStmt.getLineNum() != currentStmt.getLineNum()
+                || prevStmt.hasParseExceptions() || currentStmt.hasParseExceptions()
+                || (!ILanguageLevel.Util.STANDARD_GOSU() && hasSemicolon( prevStmt )),
                   Res.MSG_STATEMENT_ON_SAME_LINE );
         }
       }
@@ -10251,6 +10260,18 @@ public final class GosuParser extends ParserBase implements IGosuParser
     {
       decStatementDepth();
     }
+  }
+
+  private boolean hasSemicolon( IParsedElement stmt )
+  {
+    if( stmt == null )
+    {
+      return false;
+    }
+
+    IParseTree location = stmt.getLocation();
+    String stmtText = getTokenizer().getSource().substring( location.getOffset(), location.getExtent() + 1 );
+    return stmtText.length() > 0 && stmtText.charAt( stmtText.length()-1 ) == ';';
   }
 
   boolean parseLoopStatement()
@@ -14237,7 +14258,12 @@ public final class GosuParser extends ParserBase implements IGosuParser
   {
     for( int i = _locations.size(); i > iLocationsCount; i-- )
     {
-      _locations.remove( i-1 );
+      ParseTree removed = _locations.remove( i - 1 );
+      ParsedElement parsedElement = removed.getParsedElement();
+      if( parsedElement != null )
+      {
+        removeInnerClasses( parsedElement );
+      }
     }
   }
 

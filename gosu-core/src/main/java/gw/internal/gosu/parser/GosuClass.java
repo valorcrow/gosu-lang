@@ -80,7 +80,7 @@ import java.io.File;
 import java.io.InvalidClassException;
 import java.io.ObjectStreamException;
 import java.lang.ref.SoftReference;
-import java.lang.reflect.Array;
+import gw.util.Array;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -744,14 +744,36 @@ public class GosuClass extends InnerClassCapableType implements IGosuClassIntern
   {
     if( isCompilingHeader() )
     {
-      return Collections.emptySet();
+      TypeSystem.lock();
+      try
+      {
+        if( isCompilingHeader() )
+        {
+          return Collections.emptySet();
+        }
+      }
+      finally
+      {
+        TypeSystem.unlock();
+      }
     }
 
     compileHeaderIfNeeded();
 
     if( !isHeaderCompiled() )
     {
-      return Collections.emptySet();
+      TypeSystem.lock();
+      try
+      {
+        if( !isHeaderCompiled() )
+        {
+          return Collections.emptySet();
+        }
+      }
+      finally
+      {
+        TypeSystem.unlock();
+      }
     }
 
     if( _setTypes == null )
