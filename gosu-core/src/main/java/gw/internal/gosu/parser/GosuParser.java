@@ -84,6 +84,7 @@ import gw.lang.parser.IParseTree;
 import gw.lang.parser.IParsedElement;
 import gw.lang.parser.IParsedElementWithAtLeastOneDeclaration;
 import gw.lang.parser.IParserState;
+import gw.lang.parser.IReducedDynamicPropertySymbol;
 import gw.lang.parser.IResolvingCoercer;
 import gw.lang.parser.IScriptPartId;
 import gw.lang.parser.ISource;
@@ -172,6 +173,7 @@ import gw.lang.reflect.MethodScorer;
 import gw.lang.reflect.Modifier;
 import gw.lang.reflect.TypeInfoUtil;
 import gw.lang.reflect.TypeSystem;
+import gw.lang.reflect.features.IPropertyReference;
 import gw.lang.reflect.gs.ClassType;
 import gw.lang.reflect.gs.GosuClassTypeLoader;
 import gw.lang.reflect.gs.ICompilableType;
@@ -6279,7 +6281,7 @@ public final class GosuParser extends ParserBase implements IGosuParser
     if( (function == null || !(function.getType() instanceof IFunctionType)) )
     {
       listFunctionTypes = new ArrayList<>();
-      addJavaPropertyMethods( strFunction, getGosuClass(), listFunctionTypes );
+      addJavaPropertyMethods( strFunction, false, getGosuClass(), listFunctionTypes );
       if( listFunctionTypes.stream().anyMatch( ft -> ft.getDisplayName().equals( strFunction ) ) )
       {
         String strPropertyName = getPropertyNameFromMethodName( strFunction );
@@ -7314,9 +7316,10 @@ public final class GosuParser extends ParserBase implements IGosuParser
     IPropertyInfo pi = e.getPropertyInfo();
     if( pi instanceof IGosuPropertyInfo )
     {
+      IReducedDynamicPropertySymbol dps = ((IGosuPropertyInfo)pi).getDps();
       IFunctionType funcType = pi.isReadable( getGosuClass() )
-                               ? (IFunctionType)((IGosuPropertyInfo)pi).getDps().getGetterDfs().getType()
-                               : (IFunctionType)((IGosuPropertyInfo)pi).getDps().getSetterDfs().getType();
+                               ? dps.getGetterDfs() == null ? null : (IFunctionType)dps.getGetterDfs().getType()
+                               : dps.getSetterDfs() == null ? null : (IFunctionType)dps.getSetterDfs().getType();
       if( funcType == null || !Modifier.isReified( funcType.getModifiers() ) )
       {
         return;
@@ -7437,17 +7440,18 @@ public final class GosuParser extends ParserBase implements IGosuParser
   {
     // Get a preliminary funcTypes to check arguments. Note we do this to aid in in error feedback and value popup completion.
     List<IFunctionType> listFunctionTypes = new ArrayList<>( 8 );
+    boolean syntheticTypeLiteral = isSyntheticTypeLiteral( e, rootType );
     try
     {
       if( !(rootType instanceof ErrorType) )
       {
         getFunctionType( rootType, strMemberName, null, listFunctionTypes, this, true );
-        addJavaPropertyMethods( strMemberName, rootType, listFunctionTypes );
+        addJavaPropertyMethods( strMemberName, syntheticTypeLiteral, rootType, listFunctionTypes );
       }
     }
     catch( ParseException pe )
     {
-      addJavaPropertyMethods( strMemberName, rootType, listFunctionTypes );
+      addJavaPropertyMethods( strMemberName, syntheticTypeLiteral, rootType, listFunctionTypes );
       if( listFunctionTypes.isEmpty() )
       {
         e.addParseException( pe );
@@ -7461,7 +7465,15 @@ public final class GosuParser extends ParserBase implements IGosuParser
     return listFunctionTypes;
   }
 
-  private void addJavaPropertyMethods( String strMemberName, IType rootType, List<IFunctionType> listFunctionTypes )
+  private boolean isSyntheticTypeLiteral( BeanMethodCallExpression e, IType rootType )
+  {
+    Expression rootExpression = e.getRootExpression();
+    return rootExpression != null && rootExpression.isSynthetic() &&
+           rootType instanceof IMetaType &&
+           ((IMetaType)rootType).isLiteral();
+  }
+
+  private void addJavaPropertyMethods( String strMemberName, boolean syntheticTypeLiteral, IType rootType, List<IFunctionType> listFunctionTypes )
   {
     String propName = getPropertyNameFromMethodNameIncludingSetter( strMemberName );
     if( propName != null )
@@ -7492,6 +7504,12 @@ public final class GosuParser extends ParserBase implements IGosuParser
           }
           if( mi != null )
           {
+            if( syntheticTypeLiteral && mi.getOwnersType() == JavaTypes.ITYPE() )
+            {
+              // Don't include Meta type properties for implied root expressions
+              return;
+            }
+
             FunctionType functionType = new FunctionType( mi );
             if( !listFunctionTypes.contains( functionType ) )
             {
@@ -12267,29 +12285,7 @@ public final class GosuParser extends ParserBase implements IGosuParser
           }
           else if( fl.hasParseExceptions() )
           {
-            IFeatureInfo feature = fl.getFeature();
-            List<IAttributedFeatureInfo> features = Collections.emptyList();
-            if( feature != null )
-            {
-              features = getAllStaticFeatures( gsType, feature.getName() );
-            }
-            if( !features.isEmpty() )
-            {
-              usesStmt.setFeatureSpace( true );
-              for( IAttributedFeatureInfo f : features )
-              {
-                UsesStatement stmt = new UsesStatement();
-                stmt.setTypeName( strTypeName );
-                processUsesStatement( stmt, typeLiteral, f, gsType );
-              }
-            }
-            else
-            {
-              IParseIssue first = fl.getParseExceptions().get( 0 );
-              usesStmt.addParseException( first );
-              //noinspection ThrowableResultOfMethodCallIgnored
-              fl.removeParseException( first.getMessageKey() );
-            }
+            handleMultipleMatches( usesStmt, typeLiteral, fl, gsType, strTypeName );
           }
           else if( verify( usesStmt, fl.isStaticish() && !fl.isConstructorLiteral(), Res.MSG_CANNOT_REFERENCE_NON_STATIC_FEATURE_HERE ) )
           {
@@ -12312,6 +12308,45 @@ public final class GosuParser extends ParserBase implements IGosuParser
     while( match( null, ';' ) )
     {
       //pushStatement( new NoOpStatement() );
+    }
+  }
+
+  private void handleMultipleMatches( UsesStatement usesStmt, TypeLiteral typeLiteral, FeatureLiteral fl,
+                                      IGosuClass gsType, String strTypeName )
+  {
+    List<IAttributedFeatureInfo> features = Collections.emptyList();
+
+    // Note a method reference without parenthesis parses as a property reference, otherwise if the method
+    // reference has parens, it'll be a IMethodReference which we don't want to match against i.e., parens
+    // implies the reference is intended to be a specific one. Without parens we use the property reference
+    // just for the name to match against all function overloads with that name.
+    if( TypeSystem.get( IPropertyReference.class ).isAssignableFrom( fl.getType() ) )
+    {
+      IFeatureInfo feature = fl.getFeature();
+      if( feature != null )
+      {
+        features = getAllStaticFeatures( gsType, feature.getName() );
+      }
+    }
+
+    if( !features.isEmpty() )
+    {
+      usesStmt.setFeatureSpace( true );
+      for( IAttributedFeatureInfo f : features )
+      {
+        UsesStatement stmt = new UsesStatement();
+        stmt.setTypeName( strTypeName );
+        processUsesStatement( stmt, typeLiteral, f, gsType );
+      }
+    }
+    else
+    {
+      // keep the error if the ref is invalid
+
+      IParseIssue first = fl.getParseExceptions().get( 0 );
+      usesStmt.addParseException( first );
+      //noinspection ThrowableResultOfMethodCallIgnored
+      fl.removeParseException( first.getMessageKey() );
     }
   }
 
