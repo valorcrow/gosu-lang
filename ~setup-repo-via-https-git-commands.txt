@@ -1,5 +1,4 @@
 git clone https://github.com/valorcrow/gosu-lang.git
-cd gosu-lang/
 git remote add upstream https://github.com/gosu-lang/gosu-lang.git
 git fetch upstream
 git remote show
